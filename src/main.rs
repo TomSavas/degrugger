@@ -19,6 +19,10 @@ use crate::insertpoint::Point;
 
 mod patcher;
 
+use crate::session::Run;
+
+use nix::sys::{ptrace, wait::waitpid}; // TEMP
+
 struct DebuggerContext<'a> {
     path_input: String,
     session: Result<Session<'a>, ()>,
@@ -148,7 +152,36 @@ fn main_menu(ui: &imgui::Ui, ctx: &mut DebuggerContext) {
         }
     });
 
-    ui.disabled(ctx.session.is_err() || ctx.session.as_ref().unwrap().active_run.is_none(), || {
+
+        let run = match &mut ctx.session {
+            Ok(s) => s.active_run.as_mut(),
+            Err(_) => None
+        };
+
+    let run_active = ctx.session.is_ok() && ctx.session.as_ref().unwrap().active_run.is_some();
+
+    ui.disabled(!run_active, || {
+        if ui.button("C",) {
+            let s = ctx.session.as_mut().unwrap();
+            if let Some(r) = s.active_run.as_mut() {
+                //r.debugee_patcher.cont();
+
+                let regs = ptrace::getregs(r.debugee_pid).unwrap();
+                println!("RIP: {:x}", regs.rip);
+
+                for bp in s.breakpoints.iter() {
+                    let addr = bp.point.addr + 0x555555555040 - 0x1040;
+                    if addr == (regs.rip - 1) {
+                        r.debugee_patcher.cont(addr);
+                        break;
+                    }
+                }
+                r.cont();
+            }
+        }
+    });
+
+    ui.disabled(!run_active, || {
         if ui.arrow_button("##", imgui::Direction::Down) {
 
         }
@@ -182,6 +215,19 @@ fn main() {
             );
         }
 
+        // Poll debugee events now. Don't want 1 frame delays (－‸ლ )
+        if let Ok(s) = &mut ctx.session {
+            if let Some(r) = &mut s.active_run {
+                r.poll_debugee_events(false);
+
+                // TODO: this is some atrocious shit
+                if let Some(Err(nix::errno::Errno::EOWNERDEAD)) = r.debugee_event {
+                    r.kill();
+                    s.active_run = None;
+                }
+            }
+        }
+
         let mut t = true;
         ui.show_metrics_window(&mut t);
 
@@ -191,6 +237,10 @@ fn main() {
             for file in &s.open_files {
                 code_window(ui, file, &line_num_str, &mut s.breakpoints);
             }
+
+            //bp_window(ui, s.breakpoints, debugee_state);
+            //inlined_stack_window(ui, stopped_state);
+            //stack_window(ui, stopped_state);
         }
     });
 }

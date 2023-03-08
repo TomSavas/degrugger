@@ -9,17 +9,135 @@ use crate::insertpoint::BreakPoint;
 use crate::src_file::SrcFile;
 use crate::patcher::{Patcher, LocalPatcher};
 
-pub struct StoppedRunState<'a> {
-    pub rip: u64,
-    pub file: &'a SrcFile,
-    pub line: u64,
+use std::thread::JoinHandle;
+
+use std::sync::Arc;
+use std::sync::atomic::{ AtomicBool, Ordering };
+
+use std::sync::mpsc::{ channel, Sender, Receiver };
+
+use std::result::Result;
+use nix::sys::wait::WaitStatus;
+
+use linux_personality::{personality, ADDR_NO_RANDOMIZE};
+use nix::sys::{ptrace, wait::waitpid};
+use nix::unistd::{fork, ForkResult, Pid};
+use nix::errno::Errno;
+
+use std::os::unix::process::CommandExt;
+use std::process::{exit, Command};
+
+use std::collections::{ HashSet, HashMap };
+
+struct RunThread {
+    pub join_handle: JoinHandle<()>,
+    rx: Receiver<Result<WaitStatus, Errno>>,
 }
 
-pub struct Run<'a> {
-    debugee_pid: Pid,
-    debugee_patcher: Box<dyn Patcher>,
+impl RunThread {
+    fn new(pid: Pid, parked: Arc<AtomicBool>, should_die: Arc<AtomicBool>) -> Self {
+        let (tx, rx) = channel();
 
-    stopped_state: Option<StoppedRunState<'a>>,
+        let join_handle = std::thread::spawn(move || {
+            let mut res = waitpid(pid, None);
+            while res.is_ok() {
+                if let Ok(nix::sys::wait::WaitStatus::Exited(..)) = res {
+                    // TODO: place death signal in the channel
+                    println!("Child exited, run thread died!");
+                    break;
+                }
+
+                // Before sending off the event so that we don't get deadlocked once
+                // we pick this message up by setting parked to false
+                parked.store(true, Ordering::Relaxed);
+                tx.send(res).expect("Let's assume doesn't fail for now");
+
+                while parked.load(Ordering::Relaxed) {
+                    std::thread::park();
+                }
+
+                if should_die.load(Ordering::Relaxed) {
+                    println!("Seppuku by run thread!");
+                    return;
+                }
+
+                res = waitpid(pid, None);
+            }
+        });
+
+        RunThread { join_handle: join_handle, rx: rx }
+    }
+}
+
+pub struct Run {
+    pub debugee_pid: Pid,
+    pub debugee_patcher: Box<dyn Patcher>,
+
+    run_thread_parked: Arc<AtomicBool>,
+    pub run_thread_should_die: Arc<AtomicBool>,
+    run_thread: RunThread,
+    pub debugee_event: Option<Result<WaitStatus, Errno>>,
+}
+
+impl Run {
+    pub fn new(pid: Pid) -> Self {
+        let mut run_thread_parked = Arc::new(AtomicBool::new(false));
+        let mut run_thread_should_die = Arc::new(AtomicBool::new(false));
+        Run { 
+            debugee_pid: pid,
+            debugee_patcher: Box::new(LocalPatcher::new(pid)),
+            run_thread_parked: Arc::clone(&run_thread_parked),
+            run_thread_should_die: Arc::clone(&run_thread_should_die),
+            run_thread: RunThread::new(pid, Arc::clone(&run_thread_parked), Arc::clone(&run_thread_should_die)),
+            debugee_event: None
+        }
+    }
+
+    pub fn poll_debugee_events(&mut self, block: bool) {
+        let msg = if block {
+            match self.run_thread.rx.recv() {
+                Ok(m) => Ok(m),
+                Err(_) => Err(std::sync::mpsc::TryRecvError::Disconnected),
+            }
+        } else {
+            self.run_thread.rx.try_recv()
+        };
+
+        match msg {
+            Ok(res) => {
+                println!("Signal: {:?}", res);
+                self.debugee_event = Some(res);
+            },
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                println!("Thread died! Killing run");
+                // TODO: fuck is this horrible. Return a custom event probably
+                //self.debugee_event = Some(Ok(nix::sys::wait::WaitStatus::Exited(self.debugee_pid, -1)));
+                self.debugee_event = Some(Err(Errno::EOWNERDEAD));
+            },
+            _ => {}, // Ignore empty channel issues
+        }
+    }
+
+    pub fn cont(&mut self) {
+        if !self.run_thread_parked.load(Ordering::Relaxed) {
+            return;
+        }
+
+        self.run_thread_parked.store(false, Ordering::Relaxed);
+        self.run_thread.join_handle.thread().unpark();
+        
+        // TODO: This can get fucked by some timing issues
+        // ~~e.g. if this is called before the watcher thread parks itself~~
+        // potentially?
+
+        ptrace::cont(self.debugee_pid, None);
+    }
+
+    pub fn kill(&mut self) {
+        self.run_thread_should_die.store(true, Ordering::Relaxed);
+        self.run_thread_parked.store(false, Ordering::Relaxed);
+        self.run_thread.join_handle.thread().unpark();
+    }
 }
 
 pub struct Session<'a> {
@@ -36,18 +154,8 @@ pub struct Session<'a> {
     pub breakpoints: Vec<BreakPoint<'a>>,
     pub open_files: Vec<SrcFile>,
         
-    pub active_run: Option<Run<'a>>,
+    pub active_run: Option<Run>,
 }
-
-use linux_personality::{personality, ADDR_NO_RANDOMIZE};
-use nix::sys::{ptrace, wait::waitpid};
-use nix::unistd::{fork, ForkResult, Pid};
-use nix::errno::Errno;
-
-use std::os::unix::process::CommandExt;
-use std::process::{exit, Command};
-
-use std::collections::{ HashSet, HashMap };
 
 impl<'a> Session<'a> {
     pub fn new(path_str: String) -> std::result::Result<Session<'a>, ()> {
@@ -194,40 +302,22 @@ impl<'a> Session<'a> {
                 println!("Child pid: {child}");
 
                 {
-                    let mut run = Run{ debugee_pid: child, debugee_patcher: Box::new(LocalPatcher::new(child)), stopped_state: None };
-                    waitpid(child, None);
+                    let mut run = Run::new(child);
 
-                    let addresses: Vec<u64> = self.breakpoints.iter().map(|bp| {
-                        println!("BP addr: {:x}, line: {}", bp.point.addr, bp.point.line_number);
-                        bp.point.addr + 0x555555555040 - 0x1040
-                    }).collect();
-                    run.debugee_patcher.inject_breakpoints(&addresses);
-
-                    ptrace::cont(child, None);
-
-                    let mut res = waitpid(child, None);
-                    while res.is_ok() {
-                        match res {
-                            Ok(nix::sys::wait::WaitStatus::Exited(..)) => break,
-                            _ => {},
-                        }
-                        let regs = ptrace::getregs(child).unwrap();
-                        println!("Signal: {:?}, at {:x}", res, regs.rip);
-
-                        std::io::stdin().read_line(&mut String::new()).expect("Error reading input");
-
-                        for bp in self.breakpoints.iter() {
-                            let addr = bp.point.addr + 0x555555555040 - 0x1040;
-                            if addr == (regs.rip - 1) {
-                                run.debugee_patcher.cont(addr);
-                                break;
-                            }
-                        }
-
-                        res = waitpid(child, None);
+                    // At this point the debugee has launched and should have SIGTRAPped
+                    run.poll_debugee_events(true);
+                    match run.debugee_event {
+                        Some(Ok(nix::sys::wait::WaitStatus::Stopped(_, SIGTRAP))) => {
+                            // TODO: fix this bullshit
+                            let addresses: Vec<u64> = self.breakpoints.iter().map(|bp| {
+                                println!("BP addr: {:x}, line: {}", bp.point.addr, bp.point.line_number);
+                                bp.point.addr + 0x555555555040 - 0x1040
+                            }).collect();
+                            run.debugee_patcher.inject_breakpoints(&addresses);
+                        },
+                        _ => { panic!("Errrm, something went wrong..."); }
                     }
-                    println!("Child exited.");
-
+                    run.cont();
                     self.active_run = Some(run);
                 }
             },

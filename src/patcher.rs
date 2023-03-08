@@ -67,7 +67,6 @@ impl Patcher for LocalPatcher {
         waitpid(self.pid, None); // NOTE: Bad bad bad bad, will freeze the debugger, pass in a closure
 
         self.enable_breakpoints(&vec![addr]);
-        ptrace::cont(self.pid, None); // NOTE: also should not be here
 
         Ok(())
     }
