@@ -1,6 +1,7 @@
 use crate::src_file::SrcFile;
 
 //pub struct Point<'a> {
+#[derive(Debug)]
 pub struct Point<'a> {
     pub addr: u64, 
     //old_instruction: u8,
@@ -60,6 +61,7 @@ trait InsertPoint {
     fn set_enable(&mut self, enable: bool);
 }
 
+#[derive(Debug)]
 pub struct BreakPoint<'a> {
     pub point: Point<'a>,
 

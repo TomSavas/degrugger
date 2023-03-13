@@ -69,6 +69,20 @@ impl RunThread {
     }
 }
 
+use nix::libc::user_regs_struct as UserRegsStruct;
+
+pub struct DebugeeState {
+    pub regs: UserRegsStruct,
+
+    pub addr: i64,
+    pub file: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+pub struct RuntimeAddr(u64);
+pub struct RuntimeBreakpoint{}
+
 pub struct Run {
     pub debugee_pid: Pid,
     pub debugee_patcher: Box<dyn Patcher>,
@@ -76,24 +90,34 @@ pub struct Run {
     run_thread_parked: Arc<AtomicBool>,
     pub run_thread_should_die: Arc<AtomicBool>,
     run_thread: RunThread,
+
     pub debugee_event: Option<Result<WaitStatus, Errno>>,
+    pub debugee_state: Option<DebugeeState>,
+
+    pub breakpoints: HashMap<RuntimeAddr, RuntimeBreakpoint>,
 }
 
 impl Run {
     pub fn new(pid: Pid) -> Self {
-        let mut run_thread_parked = Arc::new(AtomicBool::new(false));
-        let mut run_thread_should_die = Arc::new(AtomicBool::new(false));
+        let run_thread_parked = Arc::new(AtomicBool::new(false));
+        let run_thread_should_die = Arc::new(AtomicBool::new(false));
         Run { 
             debugee_pid: pid,
             debugee_patcher: Box::new(LocalPatcher::new(pid)),
             run_thread_parked: Arc::clone(&run_thread_parked),
             run_thread_should_die: Arc::clone(&run_thread_should_die),
             run_thread: RunThread::new(pid, Arc::clone(&run_thread_parked), Arc::clone(&run_thread_should_die)),
-            debugee_event: None
+            debugee_event: None,
+            debugee_state: None,
+            breakpoints: HashMap::new(),
         }
     }
 
-    pub fn poll_debugee_events(&mut self, block: bool) {
+    pub fn sync_bp_state(&mut self, bps: Vec<BreakPoint<'_>>) {
+
+    }
+
+    pub fn poll_debugee_state(&mut self, block: bool) {
         let msg = if block {
             match self.run_thread.rx.recv() {
                 Ok(m) => Ok(m),
@@ -105,8 +129,18 @@ impl Run {
 
         match msg {
             Ok(res) => {
-                println!("Signal: {:?}", res);
+                //println!("Signal: {:?}", res);
                 self.debugee_event = Some(res);
+
+                let regs = ptrace::getregs(self.debugee_pid).expect("Getting registers failed");
+                self.debugee_state = Some(DebugeeState{
+                    regs: regs,
+                    addr: 0,
+                    file: "".to_owned(),
+                    line: 0,
+                    col: 0,
+                });
+                // TODO: generate state here
             },
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 println!("Thread died! Killing run");
@@ -133,11 +167,22 @@ impl Run {
         ptrace::cont(self.debugee_pid, None);
     }
 
+    pub fn running(&self) -> bool {
+        !self.run_thread_should_die.load(Ordering::Relaxed) && !self.run_thread_parked.load(Ordering::Relaxed) && !self.run_thread.join_handle.is_finished()
+    }
+
     pub fn kill(&mut self) {
         self.run_thread_should_die.store(true, Ordering::Relaxed);
         self.run_thread_parked.store(false, Ordering::Relaxed);
         self.run_thread.join_handle.thread().unpark();
     }
+}
+
+#[derive(Debug)]
+pub struct Function {
+    pub low_pc: u64,
+    pub high_pc: u64,
+    pub name: String,
 }
 
 pub struct Session<'a> {
@@ -152,14 +197,24 @@ pub struct Session<'a> {
     //insertpoints: Vec<Box<dyn InsertPoint>>,
     //insertpoint_groups: Vec<InsertPointGroup>,
     pub breakpoints: Vec<BreakPoint<'a>>,
+
     pub open_files: Vec<SrcFile>,
+    pub function_ranges: Vec<Function>, // TEMP: i just wanna go to sleep 
         
     pub active_run: Option<Run>,
 }
 
 impl<'a> Session<'a> {
+    pub fn add_breakpoint(bp: BreakPoint<'_>) {
+        
+    }
+
+    pub fn reconcile_bp_state_with_run() {
+        
+    }
+
     pub fn new(path_str: String) -> std::result::Result<Session<'a>, ()> {
-        let mut session = Session{ exec_path: PathBuf::from(path_str), saved_on_disk: false, saved_path: None, breakpoints: vec![], open_files: vec![], active_run: None };
+        let mut session = Session{ exec_path: PathBuf::from(path_str), saved_on_disk: false, saved_path: None, breakpoints: vec![], open_files: vec![], function_ranges: vec![], active_run: None };
 
         let path = session.exec_path.as_path();
         if !path.exists() || !path.is_file() {
@@ -261,9 +316,55 @@ impl<'a> Session<'a> {
                         files.get_mut(&path.display().to_string()).unwrap().insert(line as usize, row.address() as u64);
                     }
                 }
+
+                let mut iter = dwarf.units();
+                while let Some(header) = iter.next().unwrap() {
+                    println!(
+                        "Unit at <.debug_info+0x{:x}>",
+                        header.offset().as_debug_info_offset().unwrap().0
+                        );
+                    let unit = dwarf.unit(header).unwrap();
+
+                    // Iterate over the Debugging Information Entries (DIEs) in the unit.
+                    let mut depth = 0;
+                    let mut entries = unit.entries();
+                    while let Some((delta_depth, entry)) = entries.next_dfs().unwrap() {
+                        if entry.tag() != gimli::constants::DwTag(0x2e) {
+                            continue;
+                        }
+
+                        depth += delta_depth;
+                        println!("<{}><{:x}> {}", depth, entry.offset().0, entry.tag());
+
+                        // Iterate over the attributes in the DIE.
+                        let mut attrs = entry.attrs();
+                        let mut func = Function { low_pc: 0, high_pc: 0, name: "".to_owned() };
+                        while let Some(attr) = attrs.next().unwrap() {
+                            match attr.name() {
+                                DW_AT_low_pc => {
+                                    func.low_pc = dwarf.attr_address(&unit, attr.value()).unwrap().unwrap();
+                                },
+                                DW_AT_high_pc => {
+                                    func.high_pc = attr.udata_value().unwrap() + func.low_pc;
+                                },
+                                DW_AT_name => {
+                                    func.name = dwarf.attr_string(&unit, attr.value()).unwrap().to_string().unwrap().to_string();
+                                },
+                                //DW_AT_decl_file => {
+                                //    let name = dwarf.attr_string(&unit, attr.value()).unwrap().to_string().unwrap();
+                                //    println!("file: {}", name);
+                                //}, 
+                                _ => {},
+                            }
+                        }
+                        println!("{:?}", func);
+                        session.function_ranges.push(func);
+                    }
+                }
             }
         }
 
+        // Yea, well fuck all of the above, just walk it once and cache most of the useful data
         println!("Source files:");
         for (file, bps) in files.into_iter() {
             println!("\t{}", file);
@@ -305,9 +406,9 @@ impl<'a> Session<'a> {
                     let mut run = Run::new(child);
 
                     // At this point the debugee has launched and should have SIGTRAPped
-                    run.poll_debugee_events(true);
+                    run.poll_debugee_state(true);
                     match run.debugee_event {
-                        Some(Ok(nix::sys::wait::WaitStatus::Stopped(_, SIGTRAP))) => {
+                        Some(Ok(nix::sys::wait::WaitStatus::Stopped(_, nix::sys::signal::Signal::SIGTRAP))) => {
                             // TODO: fix this bullshit
                             let addresses: Vec<u64> = self.breakpoints.iter().map(|bp| {
                                 println!("BP addr: {:x}, line: {}", bp.point.addr, bp.point.line_number);
