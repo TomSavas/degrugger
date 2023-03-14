@@ -20,6 +20,7 @@ pub struct SrcFile {
 
     pub lines: Option<Vec<String>>,
     pub line_to_addr: HashMap<usize, u64>,
+    pub addr_to_line: HashMap<u64, usize>,
 }
 
 //impl File for SrcFile {
@@ -35,7 +36,7 @@ impl SrcFile {
     }
 
     pub fn new(path: PathBuf, load_contents: bool) -> io::Result<SrcFile> {
-        let mut src_file = SrcFile{ path: path, lines: None, line_to_addr: HashMap::new() };
+        let mut src_file = SrcFile{ path: path, lines: None, line_to_addr: HashMap::new(), addr_to_line: HashMap::new() };
         if load_contents {
             src_file.load_contents()?;
         }

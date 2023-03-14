@@ -35,7 +35,7 @@ struct DebuggerContext<'a> {
     hex_values: bool,
 }
 
-fn code_windows(ui: &imgui::Ui, files: &Vec<SrcFile>, line_num_str: &Vec<String>, breakpoints: &mut Vec<BreakPoint>) {
+fn code_windows(ui: &imgui::Ui, files: &Vec<SrcFile>, state: &Option<DebugeeState>, line_num_str: &Vec<String>, breakpoints: &mut Vec<BreakPoint>) {
     let w = ui.window("Src code").begin();
     if w.is_none() {
         return;
@@ -50,7 +50,7 @@ fn code_windows(ui: &imgui::Ui, files: &Vec<SrcFile>, line_num_str: &Vec<String>
 
     for file in files {
         if let Some(tab_item) = ui.tab_item(&file.path.file_name().unwrap().to_str().unwrap()) {
-            code_windoww(ui, file, &line_num_str, breakpoints);
+            code_windoww(ui, file, state, &line_num_str, breakpoints);
             tab_item.end();
         }
     }
@@ -59,7 +59,7 @@ fn code_windows(ui: &imgui::Ui, files: &Vec<SrcFile>, line_num_str: &Vec<String>
     w.end();
 }
 
-fn code_windoww(ui: &imgui::Ui, file: &SrcFile, line_num_str: &Vec<String>, breakpoints: &mut Vec<BreakPoint>) {
+fn code_windoww(ui: &imgui::Ui, file: &SrcFile, state: &Option<DebugeeState>, line_num_str: &Vec<String>, breakpoints: &mut Vec<BreakPoint>) {
     if file.lines.is_none() {
         return;
     }
@@ -76,15 +76,31 @@ fn code_windoww(ui: &imgui::Ui, file: &SrcFile, line_num_str: &Vec<String>, brea
     let scroll_x = ui.scroll_x();
     let scroll_y = ui.scroll_y();
 
-    // Line background
+    let mut bp_line = 0;
+    bp_line = match state {
+        Some(s) => {
+            let addr = s.regs.rip - (0x555555555040 - 0x1040) - 1;
+            match file.addr_to_line.get(&addr) {
+                Some(l) => *l,
+                None => 0,
+            }
+        },
+        None => 0,
+    };
 
+    // Line background
     for line in lines {
         let red = Vector4{ x: 0.1, y: 0.1, z: 0.1, w: 1.0};
         let green = Vector4{ x: 0.2, y: 0.2, z: 0.2, w: 1.0};
 
+        let mut background_color = if line_num % 2 == 0 { red } else { green };
+        if bp_line == (line_num + 1) {
+            background_color = Vector4{ x: 1.0, y: 0.8, z: 0.0, w: 0.7};
+        }
+
         let mut start = Vector2{ x: start_cursor[0] + scroll_x, y: start_cursor[1] + (line_num as f32) * char_height - scroll_y };
         let end = Vector2{ x: start.x + content_size[0], y: start.y + char_height };
-        draw_list.add_rect(start, end, if line_num % 2 == 0 { red } else { green }).filled(true).build();
+        draw_list.add_rect(start, end, background_color).filled(true).build();
 
         // Line number
         draw_list.add_text(start, ImColor32::WHITE, &line_num_str[line_num]);
@@ -414,6 +430,9 @@ fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, function_ranges:
     }
     let table_token = table_token.unwrap();
 
+    let mut names = vec![""; 32];
+    let mut frame_bases = vec![0; 32];
+
     // TODO: patcher should be split into patcher and data fetcher or smth. And stack unwinding
     // should be done in that new fetcher
     // Also this is fucking horrendous. We need a way to get a line in the program from address.
@@ -430,7 +449,8 @@ fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, function_ranges:
         let mut found = false;
         for func in function_ranges.iter() {
             if func.low_pc <= ret_addr && ret_addr <= func.high_pc {
-                stack_row(ui, &format!("Frame #{}", frame_counter), &format!("{} at 0x{:x}", func.name, frame_base)); // Well the address is a lie, but whatever
+                names[frame_counter] = &func.name;
+                frame_bases[frame_counter] = frame_base;
                 frame_counter += 1;
                 found = true;
             }
@@ -442,6 +462,10 @@ fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, function_ranges:
 
         ret_addr = ptrace::read(pid, (frame_base + 8) as *mut c_void).unwrap() as u64;
         frame_base = ptrace::read(pid, frame_base as *mut c_void).unwrap() as u64;
+    }
+
+    for i in (0..frame_counter).rev() {
+        stack_row(ui, &format!("Frame #{}", frame_counter - i - 1), &format!("{} at 0x{:x}", names[i], frame_bases[i])); // Well the address is a lie, but whatever
     }
 
     table_token.end();
@@ -543,18 +567,17 @@ fn main() {
         main_menu(ui, &mut ctx, &mut first_time);
 
         if let Ok(s) = &mut ctx.session {
-            code_windows(ui, &s.open_files, &line_num_str, &mut s.breakpoints);
-            //for file in &s.open_files {
-            //    code_window(ui, file, &line_num_str, &mut s.breakpoints);
-            //}
+            let mut maybe_state = &None;
 
-            //bp_window(ui, s.breakpoints, debugee_state);
             if let Some(r) = &s.active_run {
                 if let Some(state) = &r.debugee_state {
                     reg_window(ui, &mut ctx.hex_values, &state);
                     stack_window(ui, r.debugee_pid, &state, &s.function_ranges);
                 }
+                maybe_state = &r.debugee_state;
             }
+
+            code_windows(ui, &s.open_files, maybe_state, &line_num_str, &mut s.breakpoints);
             //inlined_stack_window(ui, stopped_state);
             //stack_window(ui, stopped_state);
         }

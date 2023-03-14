@@ -25,7 +25,7 @@ use nix::unistd::{fork, ForkResult, Pid};
 use nix::errno::Errno;
 
 use std::os::unix::process::CommandExt;
-use std::process::{exit, Command};
+use std::process::{ exit, Command };
 
 use std::collections::{ HashSet, HashMap };
 
@@ -228,7 +228,8 @@ impl<'a> Session<'a> {
         let object_owned = object::File::parse(&*bin_data).unwrap();
         let object = &object_owned;
 
-        let mut files: HashMap<String, HashMap<usize, u64>> = HashMap::new();
+        let mut file_to_line_to_addr: HashMap<String, HashMap<usize, u64>> = HashMap::new();
+        let mut file_to_addr_to_line: HashMap<String, HashMap<u64, usize>> = HashMap::new();
 
         let load_section = |id: gimli::SectionId| -> std::result::Result<std::borrow::Cow<[u8]>, gimli::Error> {
             match object.section_by_name(id.name()) {
@@ -310,10 +311,15 @@ impl<'a> Session<'a> {
 
                         println!("{:x} {}:{}:{}", row.address(), path.display(), line, column);
 
-                        if !files.contains_key(&path.display().to_string()) {
-                            files.insert(path.clone().display().to_string(), HashMap::new());
+                        if !file_to_line_to_addr.contains_key(&path.display().to_string()) {
+                            file_to_line_to_addr.insert(path.clone().display().to_string(), HashMap::new());
                         }
-                        files.get_mut(&path.display().to_string()).unwrap().insert(line as usize, row.address() as u64);
+                        file_to_line_to_addr.get_mut(&path.display().to_string()).unwrap().insert(line as usize, row.address() as u64);
+
+                        if !file_to_addr_to_line.contains_key(&path.display().to_string()) {
+                            file_to_addr_to_line.insert(path.clone().display().to_string(), HashMap::new());
+                        }
+                        file_to_addr_to_line.get_mut(&path.display().to_string()).unwrap().insert(row.address() as u64, line as usize);
                     }
                 }
 
@@ -366,15 +372,16 @@ impl<'a> Session<'a> {
 
         // Yea, well fuck all of the above, just walk it once and cache most of the useful data
         println!("Source files:");
-        for (file, bps) in files.into_iter() {
+        for (file, line_to_addr) in file_to_line_to_addr.into_iter() {
             println!("\t{}", file);
-            for (line, addr) in bps.iter() {
+            for (line, addr) in line_to_addr.iter() {
                 println!("\t\t{} at {:x}", line, addr);
             }
 
-            let src_file = SrcFile::new(std::path::PathBuf::from(file), true);
+            let src_file = SrcFile::new(std::path::PathBuf::from(&file), true);
             if let Ok(mut f) = src_file {
-                f.line_to_addr = bps;
+                f.line_to_addr = line_to_addr;
+                f.addr_to_line = file_to_addr_to_line.get(&file).unwrap().clone();
                 session.open_files.push(f);
             }
         }
