@@ -29,6 +29,8 @@ use std::process::{ exit, Command };
 
 use std::collections::{ HashSet, HashMap };
 
+use crate::OfflineDebugInfo;
+
 struct RunThread {
     pub join_handle: JoinHandle<()>,
     rx: Receiver<Result<WaitStatus, Errno>>,
@@ -191,6 +193,8 @@ pub struct Session<'a> {
     saved_on_disk: bool, // store some save metadata
     saved_path: Option<PathBuf>,
 
+    debug_info: OfflineDebugInfo,
+
     //debug_info: DebugInfo,
     //binary: BinaryFile,
 
@@ -214,7 +218,8 @@ impl<'a> Session<'a> {
     }
 
     pub fn new(path_str: String) -> std::result::Result<Session<'a>, ()> {
-        let mut session = Session{ exec_path: PathBuf::from(path_str), saved_on_disk: false, saved_path: None, breakpoints: vec![], open_files: vec![], function_ranges: vec![], active_run: None };
+        let exec_path = PathBuf::from(path_str);
+        let mut session = Session{ exec_path: exec_path.clone(), saved_on_disk: false, saved_path: None, debug_info: OfflineDebugInfo::new(exec_path).unwrap(), breakpoints: vec![], open_files: vec![], function_ranges: vec![], active_run: None };
 
         let path = session.exec_path.as_path();
         if !path.exists() || !path.is_file() {
@@ -225,6 +230,10 @@ impl<'a> Session<'a> {
         let endian = gimli::RunTimeEndian::Little;
 
         let bin_data = std::fs::read(session.exec_path.as_path()).unwrap();
+
+        let file_kind = object::read::FileKind::parse(&*bin_data);
+        println!("File kind: {:?}", file_kind);
+
         let object_owned = object::File::parse(&*bin_data).unwrap();
         let object = &object_owned;
 
@@ -255,10 +264,10 @@ impl<'a> Session<'a> {
         // Iterate over the compilation units.
         let mut iter = dwarf.units();
         while let Some(header) = iter.next().unwrap() {
-            println!(
-                "Line number info for unit at <.debug_info+0x{:x}>",
-                header.offset().as_debug_info_offset().unwrap().0
-                );
+            //println!(
+            //    "Line number info for unit at <.debug_info+0x{:x}>",
+            //    header.offset().as_debug_info_offset().unwrap().0
+            //    );
             let unit = dwarf.unit(header).unwrap();
 
             // Get the line program for the compilation unit.
@@ -274,7 +283,7 @@ impl<'a> Session<'a> {
                 while let Some((header, row)) = rows.next_row().unwrap() {
                     if row.end_sequence() {
                         // End of sequence indicates a possible gap in addresses.
-                        println!("{:x} end-sequence", row.address());
+                        //println!("{:x} end-sequence", row.address());
                     } else {
                         // Determine the path. Real applications should cache this for performance.
                         let mut path = std::path::PathBuf::new();
@@ -309,7 +318,7 @@ impl<'a> Session<'a> {
                             gimli::ColumnType::Column(column) => column.get(),
                         };
 
-                        println!("{:x} {}:{}:{}", row.address(), path.display(), line, column);
+                        //println!("{:x} {}:{}:{}", row.address(), path.display(), line, column);
 
                         if !file_to_line_to_addr.contains_key(&path.display().to_string()) {
                             file_to_line_to_addr.insert(path.clone().display().to_string(), HashMap::new());
@@ -323,60 +332,60 @@ impl<'a> Session<'a> {
                     }
                 }
 
-                let mut iter = dwarf.units();
-                while let Some(header) = iter.next().unwrap() {
-                    println!(
-                        "Unit at <.debug_info+0x{:x}>",
-                        header.offset().as_debug_info_offset().unwrap().0
-                        );
-                    let unit = dwarf.unit(header).unwrap();
+                //let mut iter = dwarf.units();
+                //while let Some(header) = iter.next().unwrap() {
+                //    println!(
+                //        "Unit at <.debug_info+0x{:x}>",
+                //        header.offset().as_debug_info_offset().unwrap().0
+                //        );
+                //    let unit = dwarf.unit(header).unwrap();
 
-                    // Iterate over the Debugging Information Entries (DIEs) in the unit.
-                    let mut depth = 0;
-                    let mut entries = unit.entries();
-                    while let Some((delta_depth, entry)) = entries.next_dfs().unwrap() {
-                        if entry.tag() != gimli::constants::DwTag(0x2e) {
-                            continue;
-                        }
+                //    // Iterate over the Debugging Information Entries (DIEs) in the unit.
+                //    let mut depth = 0;
+                //    let mut entries = unit.entries();
+                //    while let Some((delta_depth, entry)) = entries.next_dfs().unwrap() {
+                //        if entry.tag() != gimli::constants::DwTag(0x2e) {
+                //            continue;
+                //        }
 
-                        depth += delta_depth;
-                        println!("<{}><{:x}> {}", depth, entry.offset().0, entry.tag());
+                //        depth += delta_depth;
+                //        println!("<{}><{:x}> {}", depth, entry.offset().0, entry.tag());
 
-                        // Iterate over the attributes in the DIE.
-                        let mut attrs = entry.attrs();
-                        let mut func = Function { low_pc: 0, high_pc: 0, name: "".to_owned() };
-                        while let Some(attr) = attrs.next().unwrap() {
-                            match attr.name() {
-                                DW_AT_low_pc => {
-                                    func.low_pc = dwarf.attr_address(&unit, attr.value()).unwrap().unwrap();
-                                },
-                                DW_AT_high_pc => {
-                                    func.high_pc = attr.udata_value().unwrap() + func.low_pc;
-                                },
-                                DW_AT_name => {
-                                    func.name = dwarf.attr_string(&unit, attr.value()).unwrap().to_string().unwrap().to_string();
-                                },
-                                //DW_AT_decl_file => {
-                                //    let name = dwarf.attr_string(&unit, attr.value()).unwrap().to_string().unwrap();
-                                //    println!("file: {}", name);
-                                //}, 
-                                _ => {},
-                            }
-                        }
-                        println!("{:?}", func);
-                        session.function_ranges.push(func);
-                    }
-                }
+                //        // Iterate over the attributes in the DIE.
+                //        let mut attrs = entry.attrs();
+                //        let mut func = Function { low_pc: 0, high_pc: 0, name: "".to_owned() };
+                //        while let Some(attr) = attrs.next().unwrap() {
+                //            match attr.name() {
+                //                DW_AT_low_pc => {
+                //                    func.low_pc = dwarf.attr_address(&unit, attr.value()).unwrap().unwrap();
+                //                },
+                //                DW_AT_high_pc => {
+                //                    func.high_pc = attr.udata_value().unwrap() + func.low_pc;
+                //                },
+                //                DW_AT_name => {
+                //                    func.name = dwarf.attr_string(&unit, attr.value()).unwrap().to_string().unwrap().to_string();
+                //                },
+                //                //DW_AT_decl_file => {
+                //                //    let name = dwarf.attr_string(&unit, attr.value()).unwrap().to_string().unwrap();
+                //                //    println!("file: {}", name);
+                //                //}, 
+                //                _ => {},
+                //            }
+                //        }
+                //        println!("{:?}", func);
+                //        session.function_ranges.push(func);
+                //    }
+                //}
             }
         }
 
         // Yea, well fuck all of the above, just walk it once and cache most of the useful data
-        println!("Source files:");
+        //println!("Source files:");
         for (file, line_to_addr) in file_to_line_to_addr.into_iter() {
-            println!("\t{}", file);
-            for (line, addr) in line_to_addr.iter() {
-                println!("\t\t{} at {:x}", line, addr);
-            }
+            //println!("\t{}", file);
+            //for (line, addr) in line_to_addr.iter() {
+            //    println!("\t\t{} at {:x}", line, addr);
+            //}
 
             let src_file = SrcFile::new(std::path::PathBuf::from(&file), true);
             if let Ok(mut f) = src_file {
@@ -384,6 +393,7 @@ impl<'a> Session<'a> {
                 f.addr_to_line = file_to_addr_to_line.get(&file).unwrap().clone();
                 session.open_files.push(f);
             }
+            session.debug_info.load_file(std::path::PathBuf::from(&file), true);
         }
 
         Ok(session)
@@ -437,3 +447,74 @@ impl<'a> Session<'a> {
         Ok(&self.active_run.as_ref().unwrap())
     }
 }
+
+//enum DebugeeEvent {
+//    Status(WaitStatus),
+//    Error(Errno),
+//    None,
+//}
+//
+//pub struct RuntimeAddr(usize);
+//
+//struct DebugeeWatcherThread {
+//
+//}
+//
+//struct Callsite {
+//    addr: RuntimeAddr,
+//
+//    filename: String,
+//    function: String,
+//
+//    line: usize, 
+//    col: usize,
+//}   
+//
+//struct StoppedRuntimeInfo {
+//    // TODO: for now single-thread focused
+//    regs: UserRegsStruct,
+//    addr: RuntimeAddr,
+//
+//    callstack: Vec<Callsite>,
+//}
+//
+//struct RuntimeDebugInfo {
+//    stopped_info: Option<StoppedRuntimeInfo>,
+//    // TODO: for now remap every address. Not 100% on how relocation and mixing works. Most likely
+//    // does so in blocks.
+//    address_remapping_offline_to_runtime: HashMap<OfflineAddr, RuntimeAddr>,
+//    address_remapping_runtime_to_offline: HashMap<RuntimeAddr, OfflineAddr>,
+//}
+//
+//struct RuntimeDebugInfoThread {
+//}
+//
+//pub struct Run {
+//    debugee_pid: Pid,
+//    debugee_patcher: Box<dyn Patcher>,
+//
+//    debugee_watcher_thread: DebugeeWatcherThread,
+//    debugee_events: VecDeque<DebugeeEvent>,
+//
+//    debug_info_thread: RuntimeDebugInfoThread, // Actually the same thread as debugee watcher thread
+//    debug_info: RuntimeDebugInfo,
+//}
+//
+//struct FrontendBreakpoint {
+//    file: &DebugSrcFile,
+//    location: BreakableLocation,
+//
+//    enabled: bool,
+//}
+//
+//pub struct Session<'a> {
+//    exec_path: BinFile,
+//
+//    debug_info: OfflineDebugInfo,
+//
+//    // TODO: do session saving
+//
+//    breakpoints: Vec<FrontendBreakpoint>,
+//    open_files: Vec<&DebugSrcFile>,
+//    active_run: Option<Run>,
+//}

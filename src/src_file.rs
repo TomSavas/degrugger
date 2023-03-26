@@ -7,6 +7,8 @@ use std::io::BufReader;
 use std::io::BufRead;
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 //pub trait File {
 //    fn load_contents(&mut self) -> io::Result<bool>;
@@ -23,8 +25,33 @@ pub struct SrcFile {
     pub addr_to_line: HashMap<u64, usize>,
 }
 
+impl Hash for SrcFile {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // TODO: should contain date, checksum, etc.
+        self.path.hash(state);
+    }
+}
+
+impl PartialEq for SrcFile {
+    fn eq(&self, other: &Self) -> bool {
+        let mut a = DefaultHasher::new();
+        let mut b = DefaultHasher::new();
+        self.hash(&mut a);
+        other.hash(&mut b);
+
+        a.finish() == b.finish()
+    }
+}
+
 //impl File for SrcFile {
 impl SrcFile {
+    pub fn simple_hash(&self) -> u64 {
+        let mut a = DefaultHasher::new();
+        self.hash(&mut a);
+
+        a.finish()
+    }
+
     pub fn load_contents(&mut self) -> io::Result<bool> {
         let file = fs::File::open(&self.path)?;
         let reader = BufReader::new(file);
@@ -45,9 +72,10 @@ impl SrcFile {
     }
 }
 
-//pub struct BinaryFile {
-//    pub path: PathBuf,
-//    //hash: Hash,
-//
-//    pub contents: Option<Vec<u8>>,
-//}
+pub struct BinaryFile {
+    pub path: PathBuf,
+    //hash: Hash,
+
+    pub contents: Option<Vec<u8>>,
+    pub decompiled_src: Option<Vec<String>>
+}

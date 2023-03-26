@@ -28,6 +28,9 @@ use nix::unistd::Pid; // TEMP
 
 use nix::sys::{ptrace, wait::waitpid}; // TEMP
 
+mod offline_debug_info;
+use crate::offline_debug_info::*;
+
 struct DebuggerContext<'a> {
     path_input: String,
     session: Result<Session<'a>, ()>,
@@ -430,8 +433,8 @@ fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, function_ranges:
     }
     let table_token = table_token.unwrap();
 
-    let mut names = vec![""; 32];
-    let mut frame_bases = vec![0; 32];
+    let mut names = vec![""; 256];
+    let mut frame_bases = vec![0; 256];
 
     // TODO: patcher should be split into patcher and data fetcher or smth. And stack unwinding
     // should be done in that new fetcher
@@ -460,6 +463,7 @@ fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, function_ranges:
             break;
         }
 
+        // TODO: move this. Can crash if the child has died
         ret_addr = ptrace::read(pid, (frame_base + 8) as *mut c_void).unwrap() as u64;
         frame_base = ptrace::read(pid, frame_base as *mut c_void).unwrap() as u64;
     }
@@ -472,7 +476,15 @@ fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, function_ranges:
     w.end();
 }
 
+use std::sync::Arc;
+use std::path::PathBuf;
+
 fn main() {
+    //let a = OfflineDebugInfo::new();
+    //let a = a.unwrap();
+    //let f = SrcFile::new(PathBuf::from("/home/savas/Projects/degrugger/test_code/stack_test.c"), false).unwrap();
+    //a.debug_info_request_sender.send(Arc::new(f));
+
     let mut system = support::init(file!());
 
     let mut ctx = DebuggerContext { path_input: "/home/savas/Projects/degrugger/test_code/stack_test.out".to_owned(), session: Err(()), hex_values: true };
