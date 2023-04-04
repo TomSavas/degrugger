@@ -16,3 +16,4 @@ linux-personality = "1.0.0"
 mint = "0.5.9"
 nix = "0.26.2"
 object = "0.30.3"
+iced-x86 = { version = "1.18.0", default-features = false, features = ["std", "decoder", "nasm", "fast_fmt"] }
