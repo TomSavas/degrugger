@@ -76,10 +76,10 @@ use nix::libc::user_regs_struct as UserRegsStruct;
 pub struct DebugeeState {
     pub regs: UserRegsStruct,
 
-    pub addr: i64,
+    pub addr: u64,
     pub file: String,
-    pub line: usize,
-    pub col: usize,
+    pub line: Option<usize>,
+    pub col: Option<usize>,
 }
 
 pub struct RuntimeAddr(u64);
@@ -137,11 +137,12 @@ impl Run {
                 let regs = ptrace::getregs(self.debugee_pid).expect("Getting registers failed");
                 self.debugee_state = Some(DebugeeState{
                     regs: regs,
-                    addr: 0,
+                    addr: regs.rip,
                     file: "".to_owned(),
-                    line: 0,
-                    col: 0,
+                    line: None,
+                    col: None,
                 });
+
                 // TODO: generate state here
             },
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -193,7 +194,7 @@ pub struct Session<'a> {
     saved_on_disk: bool, // store some save metadata
     saved_path: Option<PathBuf>,
 
-    debug_info: OfflineDebugInfo,
+    pub debug_info: OfflineDebugInfo,
 
     //debug_info: DebugInfo,
     //binary: BinaryFile,
@@ -209,6 +210,10 @@ pub struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
+    pub fn sync_workers(&mut self ) {
+        self.debug_info.sync_debug_info();
+    }
+
     pub fn add_breakpoint(bp: BreakPoint<'_>) {
         
     }
@@ -391,9 +396,11 @@ impl<'a> Session<'a> {
             if let Ok(mut f) = src_file {
                 f.line_to_addr = line_to_addr;
                 f.addr_to_line = file_to_addr_to_line.get(&file).unwrap().clone();
-                session.open_files.push(f);
+                //if file.starts_with("/home/savas/Projects/rayzigger/src") {
+                    session.open_files.push(f);
+                    session.debug_info.load_file(std::path::PathBuf::from(&file), true);
+                //}
             }
-            session.debug_info.load_file(std::path::PathBuf::from(&file), true);
         }
 
         Ok(session)

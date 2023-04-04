@@ -37,7 +37,7 @@ impl Patcher for LocalPatcher {
         for addr in breakpoints {
             let mut patch = Patch { addr: *addr, original_instruction: 0, new_instruction: 0, active: false };
             unsafe {
-                println!("Adding BP -- pid in patcher: {}, addr: {:#04x} ({:})", self.pid, *addr, *addr - (0x555555555040 - 0x1040));
+                println!("Adding BP -- pid in patcher: {}, addr: {:#04x} ({:x})", self.pid, *addr, *addr - (0x555555555040 - 0x1040));
                 patch.original_instruction = ptrace::read(self.pid, *addr as *mut c_void).expect("Should not fail");
                 patch.new_instruction = (patch.original_instruction & !(0xFF as i64)) | x86_sigtrap;
                 patch.active = true;
