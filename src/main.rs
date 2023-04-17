@@ -40,6 +40,9 @@ struct UserInputs {
 
 struct DebuggerContext<'a> {
     path_input: String,
+    relevant_src_input: String,
+    filter_irrelevant_src: bool,
+
     session: Result<Session<'a>, ()>,
 
     hex_values: bool,
@@ -451,7 +454,7 @@ fn disassembly_window(ui: &imgui::Ui, inputs: &UserInputs, state: &Option<Debuge
     w.end();
 }
 
-fn code_windows(ui: &imgui::Ui, user_inputs: &UserInputs, files: &Vec<SrcFile>, state: &Option<DebugeeState>, line_num_str: &Vec<String>, breakpoints: &mut Vec<BreakPoint>, debug_info: &ThinOfflineDebugInfo) {
+fn code_windows(ui: &imgui::Ui, user_inputs: &UserInputs, files: &HashMap<u64, Arc<SrcFile>>, state: &Option<DebugeeState>, line_num_str: &Vec<String>, breakpoints: &mut Vec<BreakPoint>, debug_info: &ThinOfflineDebugInfo) {
     let w = ui.window("Src code").begin();
     if w.is_none() {
         return;
@@ -464,7 +467,7 @@ fn code_windows(ui: &imgui::Ui, user_inputs: &UserInputs, files: &Vec<SrcFile>, 
     }
     let t = t.unwrap();
 
-    for file in files {
+    for (_, file) in files {
         if let Some(tab_item) = ui.tab_item(&file.path.file_name().unwrap().to_str().unwrap()) {
             code_windoww(ui, user_inputs, file, state, &line_num_str, breakpoints, debug_info);
             tab_item.end();
@@ -753,15 +756,41 @@ fn main_menu(ui: &imgui::Ui, ctx: &mut DebuggerContext, redock: &mut bool) {
     let main_menu_token = main_menu_token.unwrap();
 
     if let Some(file_menu_token) = ui.begin_menu("File") {
+        let char_width = ui.calc_text_size(&" ")[0];
+        let width = std::cmp::max(ctx.path_input.len(), 10) + 4;
+        ui.set_next_item_width(char_width * width as f32);
+
+        let old_length = ctx.path_input.len();
         let new_input = ui.input_text("Path", &mut ctx.path_input)
             .flags(InputTextFlags::ENTER_RETURNS_TRUE)
             .build();
         ui.same_line();
         let load_pressed = ui.button("Load");
 
-        if new_input || load_pressed {
-            ctx.session = Session::new(ctx.path_input.clone());
+        if old_length != ctx.path_input.len() {
+            if let Some((s, _)) = ctx.path_input.rsplit_once("/") {
+                ctx.relevant_src_input = s.clone().to_owned();
+            }
         }
+
+        ui.checkbox("Show only relevant src files", &mut ctx.filter_irrelevant_src);
+        ui.disabled(!ctx.filter_irrelevant_src, || {
+            let width = std::cmp::max(ctx.relevant_src_input.len(), 10) + 4;
+            ui.set_next_item_width(char_width * width as f32);
+
+            ui.input_text("Relevant src root", &mut ctx.relevant_src_input)
+                .flags(InputTextFlags::ENTER_RETURNS_TRUE)
+                .build();
+        });
+
+        if new_input || load_pressed {
+            let mut src_root = None;
+            if ctx.filter_irrelevant_src {
+                src_root = Some(ctx.relevant_src_input.clone());
+            }
+            ctx.session = Session::new(ctx.path_input.clone(), src_root);
+        }
+
         file_menu_token.end();
     }
 
@@ -892,7 +921,7 @@ fn stack_row(ui: &imgui::Ui, col0: &str, col1: &str, col2: &str) {
     ui.table_next_column();
 }
 
-fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, function_ranges: &Vec<Function>, debug_info: &ThinOfflineDebugInfo, stack: &Vec<StackNode>) {
+fn stack_window(ui: &imgui::Ui, pid: Pid, state: &DebugeeState, debug_info: &ThinOfflineDebugInfo, stack: &Vec<StackNode>) {
     let w = ui.window("Stack trace")
         .position([0.0, 300.0], imgui::Condition::FirstUseEver)
         .size([300.0, 100.0], imgui::Condition::FirstUseEver)
@@ -960,7 +989,11 @@ fn main() {
 
     let mut system = support::init(file!());
 
-    let mut ctx = DebuggerContext { path_input: "/home/savas/Projects/degrugger/test_code/stack_test.out".to_owned(), session: Err(()), hex_values: true, user_inputs: UserInputs{ cont: false, focus_bp: false } };
+    let mut ctx = DebuggerContext { path_input: String::new(), relevant_src_input: String::new(), filter_irrelevant_src: false, session: Err(()), hex_values: true, user_inputs: UserInputs{ cont: false, focus_bp: false } };
+    ctx.path_input = "/home/savas/Projects/degrugger/test_code/stack_test.out".to_owned();
+    ctx.path_input.reserve(512);
+    ctx.relevant_src_input.reserve(512);
+
     let line_num_str: Vec<String> = (1..1000000).map(|x| format!("{: >4}   ", x)).collect();
 
     system.imgui.io_mut().config_flags |= ConfigFlags::DOCKING_ENABLE;
@@ -1083,18 +1116,18 @@ fn main() {
                 if let Some(state) = &r.debugee_state {
 
                     reg_window(ui, &mut ctx.hex_values, &state);
-                    let stack = generate_stack(r.debugee_pid, &state, &s.debug_info.debug_infoo);
-                    stack_window(ui, r.debugee_pid, &state, &s.function_ranges, &s.debug_info.debug_infoo, &stack);
-                    //stack_window(ui, r.debugee_pid, &state, &s.function_ranges, &s.debug_info.debug_infoo);
+                    let stack = generate_stack(r.debugee_pid, &state, &s.debug_info.debug_info);
+                    stack_window(ui, r.debugee_pid, &state, &s.debug_info.debug_info, &stack);
+                    //stack_window(ui, r.debugee_pid, &state, &s.function_ranges, &s.debug_info.debug_info);
 
-                    inlined_stack_window(ui, &state, &line_num_str, &mut s.breakpoints, &s.debug_info.debug_infoo, &stack, &s.debug_info.src_files);
+                    inlined_stack_window(ui, &state, &line_num_str, &mut s.breakpoints, &s.debug_info.debug_info, &stack, &s.debug_info.src_files);
                 maybe_state = &r.debugee_state;
                 }
             }
 
             //code_windows(ui, &s.open_files, maybe_state, &line_num_str, &mut s.breakpoints);
-            code_windows(ui, &ctx.user_inputs, &s.open_files, maybe_state, &line_num_str, &mut s.breakpoints, &s.debug_info.debug_infoo);
-            disassembly_window(ui, &ctx.user_inputs, maybe_state, &line_num_str, &mut s.breakpoints, &s.debug_info.debug_infoo);
+            code_windows(ui, &ctx.user_inputs, &s.debug_info.src_files, maybe_state, &line_num_str, &mut s.breakpoints, &s.debug_info.debug_info);
+            disassembly_window(ui, &ctx.user_inputs, maybe_state, &line_num_str, &mut s.breakpoints, &s.debug_info.debug_info);
             //inlined_stack_window(ui, stopped_state);
             //stack_window(ui, stopped_state);
         }

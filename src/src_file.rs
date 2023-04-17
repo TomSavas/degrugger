@@ -43,7 +43,6 @@ impl PartialEq for SrcFile {
     }
 }
 
-//impl File for SrcFile {
 impl SrcFile {
     pub fn simple_hash(&self) -> u64 {
         let mut a = DefaultHasher::new();
